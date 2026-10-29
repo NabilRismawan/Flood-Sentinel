@@ -71,7 +71,7 @@ bool buzzerEnabled = true;
 
 // ===================== Hardware =====================
 const int TRIG_PIN = 23;
-const int ECHO_PIN = 19;
+const int ECHO_PIN = 18;
 const int LED_GREEN = 25;
 const int LED_YELLOW = 26;
 const int LED_RED = 27;

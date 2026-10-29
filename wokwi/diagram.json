@@ -1,0 +1,95 @@
+{
+  "version": 1,
+  "author": "FloodSentinel",
+  "editor": "wokwi",
+  "parts": [
+    { "type": "wokwi-esp32-devkit-v1", "id": "esp", "top": 70, "left": -20, "attrs": {} },
+    {
+      "type": "wokwi-hc-sr04",
+      "id": "ultrasonic",
+      "top": -123.3,
+      "left": 274.3,
+      "attrs": { "distance": "102" }
+    },
+    {
+      "type": "wokwi-resistor",
+      "id": "echo-r1",
+      "top": 14.4,
+      "left": 287.45,
+      "rotate": 90,
+      "attrs": { "value": "1k" }
+    },
+    {
+      "type": "wokwi-resistor",
+      "id": "echo-r2",
+      "top": 43.2,
+      "left": 229.85,
+      "rotate": 180,
+      "attrs": { "value": "2k" }
+    },
+    {
+      "type": "wokwi-led",
+      "id": "led-green",
+      "top": 20,
+      "left": 330,
+      "attrs": { "color": "green" }
+    },
+    {
+      "type": "wokwi-resistor",
+      "id": "rg",
+      "top": 52.25,
+      "left": 430.6,
+      "rotate": 180,
+      "attrs": { "value": "220" }
+    },
+    {
+      "type": "wokwi-led",
+      "id": "led-yellow",
+      "top": 100,
+      "left": 330,
+      "attrs": { "color": "yellow" }
+    },
+    {
+      "type": "wokwi-resistor",
+      "id": "ry",
+      "top": 148.25,
+      "left": 478.6,
+      "rotate": 180,
+      "attrs": { "value": "220" }
+    },
+    { "type": "wokwi-led", "id": "led-red", "top": 180, "left": 330, "attrs": { "color": "red" } },
+    {
+      "type": "wokwi-resistor",
+      "id": "rr",
+      "top": 215.45,
+      "left": 478.6,
+      "rotate": 180,
+      "attrs": { "value": "220" }
+    },
+    { "type": "wokwi-buzzer", "id": "buzzer", "top": 261.6, "left": 328.2, "attrs": {} }
+  ],
+  "connections": [
+    [ "esp:TX0", "$serialMonitor:RX", "", [] ],
+    [ "esp:RX0", "$serialMonitor:TX", "", [] ],
+    [ "ultrasonic:VCC", "esp:VIN", "red", [ "v20", "h-480", "v237.3" ] ],
+    [ "ultrasonic:GND", "esp:GND.1", "black", [ "v40", "h-164.4", "v207.8" ] ],
+    [ "ultrasonic:TRIG", "esp:D23", "green", [ "v28.8", "h-210", "v94" ] ],
+    [ "ultrasonic:ECHO", "echo-r1:1", "blue", [ "h-48.8", "v19.2" ] ],
+    [ "echo-r1:2", "esp:D18", "blue", [ "v46.8", "h-70", "v93.2", "h-165.5" ] ],
+    [ "echo-r1:2", "echo-r2:1", "blue", [ "v-1.2", "h-27.95" ] ],
+    [ "echo-r2:2", "esp:GND.1", "black", [ "h-130", "v100", "h-80" ] ],
+    [ "esp:D25", "rg:1", "green", [ "h100", "v-30", "h190" ] ],
+    [ "rg:2", "led-green:A", "green", [ "h-20" ] ],
+    [ "led-green:C", "esp:GND.1", "black", [ "v100", "h-280" ] ],
+    [ "esp:D26", "ry:1", "orange", [ "h120", "v1.8", "h432.6" ] ],
+    [ "ry:2", "led-yellow:A", "orange", [ "h-20" ] ],
+    [ "led-yellow:C", "esp:GND.1", "black", [ "v50", "h-280" ] ],
+    [ "esp:D27", "rr:1", "red", [ "h140", "v70", "h150" ] ],
+    [ "rr:2", "led-red:A", "red", [ "h-20" ] ],
+    [ "led-red:C", "esp:GND.1", "black", [ "v0", "h-280" ] ],
+    [ "esp:D14", "buzzer:1", "purple", [ "h-4.2", "v165.2", "h374.4" ] ],
+    [ "buzzer:2", "esp:GND.1", "black", [ "v40", "h-280" ] ]
+  ],
+  "serialMonitor": { "display": "terminal" },
+  "dependencies": {}
+}

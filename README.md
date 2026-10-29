@@ -1,322 +1,188 @@
-# Flood-Sentinel
-An IoT-based drainage water level monitoring and early warning prototype using ESP32, HC-SR04, MQTT (HiveMQ), and a real-time Python dashboard. Developed as part of Samsung Innovation Campus Batch 8.
+# FloodSentinel – Python Monitoring Dashboard (Milestone 5)
 
-# FloodSentinel 🌊
+Dashboard desktop (Tkinter + Matplotlib + paho-mqtt) yang menampilkan data **simulasi** sensor
+ketinggian air dari ESP32 di Wokwi lewat broker MQTT publik HiveMQ.
 
-**IoT-Based Drainage Water Level Monitoring and Early Warning System**
-
-FloodSentinel is an Internet of Things (IoT)-based prototype designed to monitor water levels in drainage channels and provide early warnings when water levels reach predefined thresholds.
-
-The system uses an ESP32 and an HC-SR04 ultrasonic sensor to measure water levels, process monitoring data, and activate local warning indicators. Through MQTT communication using the HiveMQ Public Broker, monitoring data can be transmitted to a Python-based dashboard for real-time visualization.
-
-This project is developed as part of **Samsung Innovation Campus Batch 8**.
+> **Catatan jujur:** semua angka berasal dari simulasi Wokwi. Batas NORMAL/SIAGA/BAHAYA
+> (30 cm dan 60 cm) serta ambang naik cepat (5 cm/menit) adalah **parameter simulasi**,
+> bukan standar keselamatan banjir, dan sistem ini **belum divalidasi di lapangan**.
 
 ---
 
-## Project Overview
+## 1. Step 1 – Architecture Review (kecocokan dengan Milestone 4)
 
-Flooding in residential areas can be associated with inadequate drainage monitoring and delayed awareness of rising water levels. FloodSentinel explores an IoT-based approach to provide continuous water level monitoring and multi-level warnings.
+Dokumen Milestone 5 dan sketch `.ino` (Milestone 4) ternyata **tidak identik**:
 
-The prototype combines sensor-based monitoring, local warning mechanisms, MQTT communication, and a graphical monitoring dashboard.
+| Hal | Dokumen Milestone 5 | `.ino` yang sedang dipakai | Solusi di dashboard |
+|---|---|---|---|
+| Basis topic | `floodsentinel/sic-b8/demo01/device01` | `floodsentinel/13223072` | Dashboard mendengarkan **kedua** basis (`config.TOPIC_BASES`) |
+| Field status | `status` | `final_status` | Menerima keduanya |
+| Uptime | `uptime_ms` | `uptime_s` | Menerima keduanya (detik dikonversi) |
+| `sensor_status`, `device_id` | ada | tidak ada | Opsional; kalau kosong ditampilkan "tidak dikirim" |
+| Nilai tidak tersedia | – | `null` | Menjadi "n/a", **tidak** diganti 0 atau nilai normal |
+| Topic tambahan | `/status` | `/status`, `/online` (Last Will), `/cmd` | `/online` dipakai, `/cmd` diabaikan |
 
-### Key Features
+**Rekomendasi:** setelah tim sepakat, samakan topic di `.ino` dan hapus basis yang tidak dipakai
+di `config.py`. Hanya satu basis yang diproses pada satu waktu supaya grafik tidak tercampur.
 
-- **Water Level Monitoring:** Measures the distance between the ultrasonic sensor and the water surface.
-- **Water Level Classification:** Categorizes water conditions into Normal, Siaga, and Bahaya based on configurable thresholds.
-- **Adaptive Warning:** Escalates warning levels when a rapid increase in water level is detected.
-- **Local Alert System:** Uses LEDs and a buzzer to provide immediate visual and audible warnings.
-- **MQTT Communication:** Transmits monitoring data through the HiveMQ Public Broker.
-- **Real-Time Dashboard:** Displays water level measurements, system status, and monitoring graphs using Python.
-- **Sensor Error Handling:** Identifies invalid sensor readings and reports sensor errors.
+Dua hal lain yang perlu diketahui:
+- Broker publik HiveMQ **tanpa login**: siapa pun yang tahu topic bisa mengirim data atau perintah.
+  Karena itu dashboard ini sengaja **tidak punya tombol kontrol** (hanya membaca).
+- Rubrik SIC menyebut *HiveMQ Cloud*. Broker publik sudah cukup untuk demo, tetapi bila ingin
+  memakai HiveMQ Cloud, ubah host/port di `config.py` dan tambahkan TLS + akun (port 8883).
 
 ---
 
-## System Architecture
+## 2. Arsitektur
 
-The system follows this communication architecture:
-
-```text
-+---------------------------+
-|       Wokwi Simulator     |
-|                           |
-|  ESP32 + HC-SR04          |
-|  Green / Yellow / Red LED |
-|  Buzzer                   |
-+-------------+-------------+
-              |
-              | Wi-Fi
-              |
-              v
-+---------------------------+
-|    HiveMQ Public Broker   |
-|                           |
-|       MQTT Protocol       |
-+-------------+-------------+
-              |
-              | MQTT Subscribe
-              |
-              v
-+---------------------------+
-|    Python Monitoring      |
-|        Dashboard          |
-|                           |
-|  Tkinter + Matplotlib     |
-|  Real-Time Monitoring     |
-|  Water Level Graph        |
-|  Status & Event Log       |
-+---------------------------+
+```
+ Wokwi ESP32 ──publish──►  HiveMQ broker  ──subscribe──►  Thread paho-mqtt
+ (HC-SR04)                 broker.hivemq.com:1883              │
+                                                               ▼
+                                              MessageProcessor (data_handler.py)
+                                              validasi JSON, ekstraksi, deteksi status
+                                                               │  queue.Queue
+                                                               ▼
+                                              Thread utama Tkinter (dashboard.py)
+                                              root.after() mengosongkan queue
+                                              → panel, grafik Matplotlib, event log
 ```
 
-### Data Flow
+Aturan yang dijaga:
+1. Callback paho **tidak pernah** menyentuh widget Tkinter.
+2. Data pindah thread hanya lewat `queue.Queue`.
+3. GUI memakai `root.after()`; tidak ada `time.sleep()` di thread GUI.
+4. **CONNECTED ≠ data masuk.** Status broker dan status data (LIVE / STALE / NO DATA) ditampilkan terpisah.
 
-1. The HC-SR04 sensor measures the distance to the water surface.
-2. The ESP32 calculates the estimated water level using a predefined reference height.
-3. The monitoring algorithm classifies the water condition.
-4. LEDs and the buzzer respond according to the detected condition.
-5. The ESP32 publishes telemetry and status information through MQTT.
-6. The HiveMQ Public Broker forwards the messages to subscribed clients.
-7. The Python dashboard receives and visualizes the monitoring data.
+### Diagram alur MQTT
+
+```
+ESP32 ── telemetry (JSON, tiap ~2 dtk) ──► <basis>/telemetry ─┐
+ESP32 ── status (retained)             ──► <basis>/status    ─┼─► Dashboard (QoS 0)
+ESP32 ── Last Will "offline"/"online"  ──► <basis>/online    ─┘
+Dashboard ── subscribe saat on_connect (diulang otomatis setiap reconnect)
+```
+
+### Struktur folder
+
+```
+FloodSentinel/
+├── main.py             titik masuk, logging, siklus hidup aplikasi
+├── config.py           semua pengaturan (broker, topic, ambang, batas)
+├── mqtt_client.py      koneksi paho di thread sendiri, reconnect otomatis
+├── data_handler.py     validasi JSON, normalisasi, deteksi duplikat (tanpa GUI)
+├── dashboard.py        seluruh tampilan Tkinter + grafik Matplotlib
+├── mqtt_test.py        Step 3: uji koneksi MQTT tanpa GUI
+├── simulate_device.py  simulator ESP32 untuk pengujian (bukan bagian aplikasi)
+├── requirements.txt
+└── README.md
+```
 
 ---
 
-## Hardware Components
+## 3. Instalasi (Step 2 – Environment)
 
-| Component | Function |
-|---|---|
-| ESP32 DevKit V1 | Main microcontroller |
-| HC-SR04 | Ultrasonic distance measurement |
-| Green LED | Normal condition indicator |
-| Yellow LED | Warning condition indicator |
-| Red LED | Danger condition indicator |
-| Buzzer | Audible warning |
-| 220 Ω Resistors | LED current limiting |
-| 1 kΩ and 2 kΩ Resistors | HC-SR04 ECHO voltage divider |
-| Breadboard and Jumper Wires | Circuit connections |
-
-## Pin Configuration
-
-| Component | ESP32 GPIO |
-|---|---|
-| HC-SR04 TRIG | GPIO 23 |
-| HC-SR04 ECHO | GPIO 18 |
-| Green LED | GPIO 25 |
-| Yellow LED | GPIO 26 |
-| Red LED | GPIO 27 |
-| Buzzer | GPIO 14 |
-
-**Note:** The HC-SR04 ECHO output uses a voltage divider to reduce its 5V signal to a level suitable for the ESP32 input.
-
----
-
-## Monitoring Logic
-
-FloodSentinel uses a reference height and configurable water level thresholds.
-
-### Water Level Calculation
-
-The estimated water level is calculated using:
-
-```text
-Water Level = Reference Height - Sensor Distance
-```
-
-The current simulation uses a reference height of 100 cm.
-
-### Warning Classification
-
-| Water Level | Status | Indicator |
-|---|---|---|
-| Below 30 cm | NORMAL | Green LED |
-| 30–60 cm | SIAGA | Yellow LED |
-| Above 60 cm | BAHAYA | Red LED + Buzzer |
-
-### Adaptive Warning
-
-The system also monitors the rate of water level increase.
-
-When the detected rising rate reaches or exceeds 5 cm/min, the warning level can escalate by one level according to the implemented adaptive warning logic.
-
-This feature is intended to demonstrate an additional warning mechanism based on water level trends.
-
-**Important:** All thresholds and reference heights are simulation parameters. They have not been validated as real-world flood warning standards.
-
----
-
-## Software and Technologies
-
-| Technology | Purpose |
-|---|---|
-| ESP32 | Embedded processing |
-| Arduino Framework | ESP32 firmware development |
-| Wokwi | Hardware simulation |
-| C++ | Embedded programming |
-| MQTT | IoT messaging protocol |
-| HiveMQ Public Broker | MQTT message broker |
-| PubSubClient | MQTT client for ESP32 |
-| Python | Dashboard development |
-| Paho MQTT | MQTT client for Python |
-| Tkinter | Graphical user interface |
-| Matplotlib | Data visualization |
-
----
-
-## MQTT Configuration
-
-FloodSentinel uses the HiveMQ Public MQTT Broker for communication.
-
-| Configuration | Value |
-|---|---|
-| Broker | `broker.hivemq.com` |
-| Port | `1883` |
-| Protocol | MQTT |
-| Authentication | Not required |
-| QoS | 0 |
-
-### MQTT Topics
-
-**Telemetry Topic**
-
-```text
-floodsentinel/sic-b8/demo01/device01/telemetry
-```
-
-**Status Topic**
-
-```text
-floodsentinel/sic-b8/demo01/device01/status
-```
-
-### Example Telemetry Payload
-
-```json
-{
-  "device_id": "floodsentinel_01",
-  "distance_cm": 54.5,
-  "water_level_cm": 45.5,
-  "rise_rate_cm_min": 2.3,
-  "base_status": "SIAGA",
-  "status": "SIAGA",
-  "sensor_status": "NORMAL",
-  "uptime_ms": 123456
-}
-```
-
-The payload represents an example telemetry message and may differ depending on the firmware implementation.
-
----
-
-## Getting Started
-
-### 1. ESP32 Simulation
-
-1. Open the FloodSentinel Wokwi project.
-2. Verify the ESP32 circuit connections.
-3. Ensure the firmware contains the required Wi-Fi and MQTT configuration.
-4. Start the simulation.
-5. Open the Serial Monitor to observe sensor readings and connection status.
-
-The Wokwi simulation uses the virtual Wi-Fi network:
-
-```cpp
-const char* WIFI_SSID = "Wokwi-GUEST";
-const char* WIFI_PASSWORD = "";
-```
-
-### 2. MQTT Monitoring
-
-To inspect published MQTT messages:
-
-1. Open the [HiveMQ WebSocket Client](https://www.hivemq.com/demos/websocket-client/).
-2. Connect to the public broker using its WebSocket endpoint.
-3. Subscribe to the FloodSentinel telemetry topic.
-4. Start the Wokwi simulation.
-5. Observe incoming JSON messages.
-
-The ESP32 uses MQTT over TCP, while the browser-based WebSocket client uses the broker's WebSocket endpoint.
-
-### 3. Python Dashboard
-
-Install Python and the required dependencies.
+Butuh Python 3.9+ (Tkinter ikut terpasang di Windows/macOS; di Linux: `sudo apt install python3-tk`).
 
 ```bash
+cd FloodSentinel
+python -m venv venv
+# Windows:  venv\Scripts\activate        Linux/macOS:  source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Run the dashboard using:
+Cek cepat: `python -c "import tkinter, paho, matplotlib; print('OK')"`
 
+## 4. Menjalankan
+
+**Step 3 – tes koneksi dulu (tanpa GUI):**
+```bash
+python mqtt_test.py --selftest      # broker bisa dipakai? (kirim ke diri sendiri)
+python mqtt_test.py --seconds 30    # dengarkan data dari Wokwi
+```
+
+**Step 4 – jalankan dashboard:**
 ```bash
 python main.py
 ```
+Log ikut tersimpan di `floodsentinel.log`.
 
-The exact execution command and dependency list should match the final repository structure.
+### Menghubungkan dengan Wokwi
+1. Buka proyek Wokwi dan jalankan simulasi sampai Serial Monitor menampilkan WiFi dan MQTT terhubung.
+2. Pastikan di `.ino`: broker `broker.hivemq.com`, port `1883`, dan **topic sama** dengan salah satu basis di `config.py`.
+3. Jalankan `python mqtt_test.py`; pesan telemetry harus muncul.
+4. Jalankan `python main.py`. Banner oranye "Menunggu telemetry" hilang saat data pertama tiba.
+5. Wokwi harus tetap berjalan (tab terbuka); simulasi berhenti ketika tab ditutup.
+
+### Mengubah pengaturan tanpa mengedit file
+```bash
+# contoh: broker lokal dan topic sendiri
+FS_BROKER_HOST=127.0.0.1 FS_BROKER_PORT=1883 FS_TOPIC_BASES=floodsentinel/13223072 python main.py
+```
+(Windows PowerShell: `$env:FS_BROKER_HOST="127.0.0.1"; python main.py`)
 
 ---
 
-## Testing Scenarios
+## 5. Penjelasan modul
 
-The following scenarios are intended for functional and integration testing:
+- **config.py** – satu tempat untuk broker, topic, ambang, batas titik grafik, dan batas stale.
+- **data_handler.py** – `parse_telemetry()` memvalidasi JSON; field hilang/rusak menjadi `None` + catatan
+  peringatan (tidak pernah diganti nilai normal). Status tak dikenal → `UNKNOWN`. `MessageProcessor`
+  menghitung statistik, membuang pesan duplikat beruntun, dan mengabaikan basis topic lain selagi satu basis aktif.
+- **mqtt_client.py** – `MqttWorker`: ID klien unik tiap dijalankan (ID yang sama membuat klien lain terputus),
+  `connect_async` + `loop_start`, backoff reconnect 1–15 detik, subscribe ulang di `on_connect`.
+- **dashboard.py** – panel Connection, Water Level (tangki + garis ambang), Warning Status, Rate of Rise,
+  grafik Matplotlib (maks. 300 titik, digambar ulang paling sering 2× per detik), dan Event Log (maks. 200 baris).
+  Jika telemetry berhenti > 10 detik: banner oranye, tampilan diredupkan, tulisan "DATA TIDAK DIPERBARUI" di grafik.
+- **main.py** – merangkai semuanya; menutup koneksi dengan rapi saat jendela ditutup.
 
-| Test Scenario | Expected Behavior |
+Arti status: **NORMAL** hijau (< 30 cm) · **SIAGA** kuning (30–60 cm, atau naik cepat dari NORMAL) ·
+**BAHAYA** merah (> 60 cm, atau naik cepat dari SIAGA) · **SENSOR_ERROR** ungu (ketinggian tidak diketahui).
+Dashboard **mengikuti status yang dikirim ESP32**, tidak menghitung ulang sendiri.
+
+---
+
+## 6. Prosedur pengujian
+
+Alat bantu: `simulate_device.py` (tanpa Wokwi) atau Wokwi sendiri.
+Untuk simulator, dashboard harus mendengarkan basis yang sama, mis.:
+```bash
+export FS_TOPIC_BASES=floodsentinel/test/sim        # terminal 1
+python main.py
+python simulate_device.py --scenario normal         # terminal 2 (tambah --host/--port untuk broker lain)
+```
+
+| # | Pengujian | Tujuan | Langkah | Hasil yang diharapkan | Kriteria lulus |
+|---|---|---|---|---|---|
+| 1 | Normal | Status NORMAL tampil benar | `--scenario normal` (atau Wokwi: air < 30 cm) | Kotak hijau NORMAL, grafik di zona hijau, feed LIVE | Level < 30 cm, status hijau, tanpa peringatan |
+| 2 | Warning (SIAGA) | Status SIAGA tampil | `--scenario siaga` (30–60 cm) | Kotak kuning SIAGA, log mencatat perubahan status | Status kuning, perubahan tercatat di Event Log |
+| 3 | Danger (BAHAYA) | Status BAHAYA tampil | `--scenario bahaya` (> 60 cm) | Kotak merah BAHAYA, zona tangki merah | Status merah sesuai payload |
+| 4 | Rapid rise | Kenaikan cepat terdeteksi | `--scenario rapid` | Rate ≥ 5 cm/mnt merah, penanda ▲ merah di grafik, log "KENAIKAN CEPAT", status naik satu tingkat | Log + penanda muncul; status mengikuti payload |
+| 5 | MQTT disconnection | Gangguan jaringan ditangani | Jalankan normal, lalu matikan internet/broker 20 dtk, lalu nyalakan lagi | Broker → RECONNECTING; setelah ~10 dtk banner "DATA TIDAK DIPERBARUI" dan tampilan diredupkan (jangan tampak aman); setelah pulih → CONNECTED + data LIVE, dan tanpa restart | Tidak crash; nilai lama jelas ditandai basi; data kembali sendiri |
+| 6 | Sensor error | Sensor gagal tidak tampak "aman" | `--scenario sensor_error` (nilai `null`) | Kotak ungu SENSOR_ERROR, level "-- cm", rate "tidak tersedia", titik grafik terputus | Tidak ada nilai 0/normal palsu |
+
+Tambahan: `--scenario invalid` (JSON rusak, field hilang, nilai bukan angka, status tak dikenal) →
+Event Log mencatat penolakan, aplikasi tetap berjalan; `--scenario dropout` → STALE lalu pulih; `--schema ino` →
+format payload `.ino` (`final_status`, `uptime_s`).
+
+---
+
+## 7. Troubleshooting
+
+| Gejala | Penyebab / solusi |
 |---|---|
-| Normal Water Level | Green LED and NORMAL status |
-| Warning Water Level | Yellow LED and SIAGA status |
-| High Water Level | Red LED, buzzer, and BAHAYA status |
-| Rapid Water Level Rise | Adaptive warning escalation |
-| Invalid Sensor Reading | SENSOR_ERROR handling |
-| MQTT Disconnection | Connection loss is handled |
-| MQTT Reconnection | Data transmission resumes |
-| Dashboard Monitoring | Incoming telemetry is visualized |
+| `ModuleNotFoundError: tkinter` | Linux: `sudo apt install python3-tk`. Windows/macOS: pasang Python dari python.org |
+| Broker "RECONNECTING" terus | Tidak ada internet, port 1883 diblokir jaringan kampus/firewall, atau host salah. Coba `python mqtt_test.py --selftest`, atau hotspot HP |
+| Broker CONNECTED tapi "Menunggu telemetry" | Wokwi belum jalan, atau **topic berbeda**. Samakan dengan `config.TOPIC_BASES`; cek dengan `mqtt_test.py` |
+| Dashboard sering terputus sendiri | Dua klien memakai Client ID sama. Dashboard memakai ID acak; ubah Client ID di `.ino` bila sama dengan milik orang lain |
+| Pesan "Telemetry dari basis lain diabaikan" | Dua perangkat aktif bersamaan; ini disengaja. Matikan salah satu |
+| Pesan "ditolak" di Event Log | Payload bukan JSON valid / tidak lengkap. Periksa Serial Monitor ESP32 |
+| Rate "belum tersedia" di awal | ESP32 butuh jendela pengukuran (± 16 detik) sebelum menghitung laju |
+| Grafik tidak bergerak | Data STALE (lihat banner), atau jendela tidak terlihat; periksa feed di panel Connection |
+| Data orang lain muncul | Broker publik; basis topic Anda mungkin dipakai pihak lain. Pakai topic yang unik |
+| Tidak bisa membuka jendela di server/WSL | Perlu layar: jalankan di desktop, atau `xvfb-run python main.py` untuk uji otomatis |
 
-Testing results should be documented based on actual simulation evidence and execution logs.
-
----
-
-## Project Limitations
-
-FloodSentinel is currently a simulation-based prototype. Several limitations must be considered:
-
-- The system has not yet been tested using physical hardware in an actual drainage environment.
-- HC-SR04 sensor accuracy under real water surface conditions has not been validated.
-- Water level thresholds are demonstration parameters and require location-specific calibration.
-- MQTT communication depends on internet connectivity.
-- HiveMQ Public Broker is a shared testing service and is not intended for production deployment.
-- The current prototype does not establish validated flood prediction capability.
-
----
-
-## Future Development
-
-Potential improvements include:
-
-- Implementing the system using physical ESP32 hardware.
-- Using waterproof and more suitable water level sensors.
-- Developing weather-resistant hardware enclosures.
-- Integrating rainfall sensors.
-- Adding historical data storage and analysis.
-- Implementing secure MQTT communication and device authentication.
-- Developing mobile notifications.
-- Conducting field calibration and testing in actual drainage channels.
-- Exploring data-driven flood risk analysis using sufficient historical measurements.
-
----
-
-## Project Team
-
-**Samsung Innovation Campus Batch 8**
-
-| Role | Responsibility |
-|---|---|
-| Project Manager & Research Analyst | Project planning, research, coordination, and documentation |
-| Hardware & Embedded Systems Engineer | Hardware design, ESP32 firmware, and sensor monitoring |
-| IoT Communication & Backend Engineer | MQTT communication, HiveMQ configuration, and data transmission |
-| Dashboard Developer & Testing Engineer | Python dashboard, data visualization, and system testing |
-
----
-
-## License
-
-This project is developed for educational and prototyping purposes as part of Samsung Innovation Campus Batch 8.
-
----
-
-**FloodSentinel — Smarter Drainage Monitoring Through IoT.**
+## 8. Keterbatasan
+- Simulasi Wokwi; tidak ada pengujian lapangan, kalibrasi sensor, atau validasi ambang banjir.
+- Broker publik tanpa autentikasi/enkripsi (QoS 0: pesan bisa hilang saat jaringan buruk).
+- Dashboard hanya membaca; tidak mengirim perintah ke perangkat.
